@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import io
+import re
 from typing import Iterator
 
 import streamlit as st
@@ -27,11 +28,12 @@ SYSTEM_PROMPT = """你是一位资深的中国生化领域专利代理人，负�
 2. 对交底书未提供但专利撰写需要的信息，使用【待补充：具体信息】标注，并在文末列出待补充事项。
 3. 权利要求书应具有清楚、简要、以说明书为依据的层次结构；合理区分产品、组合物、用途和方法权利要求，避免不必要的功能性或结果性限定。
 4. 对化合物、核酸、蛋白质、抗体、微生物、细胞、检测试剂或生物制品，保留并准确使用交底书中的名称、编号、序列、保藏号、浓度、宿主和实验条件；没有依据时不得自行补写。
-5. 说明书应包含：发明名称、摘要、权利要求书、技术领域、背景技术、发明内容、附图说明（如有）、具体实施方式和待补充事项。
-6. 背景技术应客观表述，不能虚构具体文献或现有技术结论。摘要控制在约300字以内。
-7. 实施例要清楚记载材料、步骤、对照、检测方法、统计方法和结果；对于缺失内容明确标注。
-8. 输出中文 Markdown，不要输出与专利文件无关的闲聊。先给出“事实依据与风险提示”，再给出完整专利申请文件草稿。
-9. 明确提示：该结果是撰写辅助草稿，必须由专利代理师和技术人员审核，不能替代法律意见或实验验证。
+5. 说明书应包含：发明名称、摘要、权利要求书、技术领域、背景技术、原理说明、发明内容、附图说明（如有）、具体实施方式和待补充事项。
+6. “原理说明”必须单独成节：结合交底书明确给出的生物化学机制、反应过程、信号通路、结构-功能关系或检测原理，解释技术方案为什么能够解决技术问题；不得把推测写成事实，缺少依据处标注【待补充】。
+7. 背景技术应客观表述，不能虚构具体文献或现有技术结论。摘要控制在约300字以内。
+8. 实施例要清楚记载材料、步骤、对照、检测方法、统计方法和结果；对于缺失内容明确标注。
+9. 输出中文 Markdown，不要输出与专利文件无关的闲聊。先给出“事实依据与风险提示”，再给出完整专利申请文件草稿。
+10. 明确提示：该结果是撰写辅助草稿，必须由专利代理师和技术人员审核，不能替代法律意见或实验验证。
 """
 
 
@@ -53,6 +55,48 @@ def extract_text_from_docx(file_bytes: bytes) -> str:
                 blocks.append(" | ".join(cells))
 
     return "\n".join(blocks)
+
+
+def extract_text_from_file(file_name: str, file_bytes: bytes) -> str:
+    """按扩展名读取 DOCX、TXT、Markdown 等技术交底材料。"""
+    suffix = file_name.lower().rsplit(".", 1)[-1] if "." in file_name else ""
+    if suffix == "docx":
+        return extract_text_from_docx(file_bytes)
+    if suffix in {"txt", "md", "markdown", "rst", "csv", "json"}:
+        for encoding in ("utf-8-sig", "gb18030"):
+            try:
+                return file_bytes.decode(encoding)
+            except UnicodeDecodeError:
+                continue
+        raise ValueError("文本文件不是 UTF-8 或 GB18030 编码。")
+    raise ValueError(f"暂不支持 .{suffix or '未知'} 文件格式。")
+
+
+def markdown_to_docx(markdown_text: str) -> bytes:
+    """将模型生成的 Markdown 草稿转换为可下载的 DOCX 文件。"""
+    document = Document()
+    document.core_properties.title = "生化专利申请撰写辅助草稿"
+    document.add_heading("生化专利申请撰写辅助草稿", level=0)
+    document.add_paragraph("说明：本文档由 AI 生成，仅供专利代理师和技术人员审核，不构成法律意见。")
+
+    for raw_line in markdown_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        heading = re.match(r"^#{1,6}\s+(.+)$", line)
+        if heading:
+            level = min(len(raw_line) - len(raw_line.lstrip("#")), 9)
+            document.add_heading(heading.group(1).strip(), level=level)
+        elif re.match(r"^[-*+]\s+", line):
+            document.add_paragraph(re.sub(r"^[-*+]\s+", "", line), style="List Bullet")
+        elif re.match(r"^\d+[.)]\s+", line):
+            document.add_paragraph(re.sub(r"^\d+[.)]\s+", "", line), style="List Number")
+        else:
+            document.add_paragraph(line)
+
+    output = io.BytesIO()
+    document.save(output)
+    return output.getvalue()
 
 
 def stream_patent_draft(
@@ -95,7 +139,7 @@ def stream_patent_draft(
 
 
 st.title("🧬 生化专利代理人助手")
-st.caption("上传技术交底书（DOCX），使用您自己的 OpenAI 兼容 API 生成中国发明专利撰写辅助草稿。")
+st.caption("上传 DOCX、TXT、MD 等技术交底材料，使用您自己的 OpenAI 兼容 API 生成中国发明专利撰写辅助草稿。")
 
 with st.sidebar:
     st.header("⚙️ API 配置")
@@ -117,13 +161,17 @@ with st.sidebar:
         "充分公开、序列/结构、实验数据及法律合规性。"
     )
 
-uploaded_file = st.file_uploader("📂 上传技术交底书", type=["docx"])
+uploaded_file = st.file_uploader(
+    "📂 上传技术交底书或技术材料",
+    type=["docx", "txt", "md", "markdown", "rst", "csv", "json"],
+    help="支持 DOCX、TXT、Markdown、RST、CSV 和 JSON；文本文件支持 UTF-8 或 GB18030 编码。",
+)
 
 if uploaded_file is not None:
     try:
-        document_text = extract_text_from_docx(uploaded_file.getvalue())
+        document_text = extract_text_from_file(uploaded_file.name, uploaded_file.getvalue())
     except Exception as exc:
-        st.error(f"DOCX 解析失败：{exc}")
+        st.error(f"文件解析失败：{exc}")
         st.stop()
 
     if not document_text.strip():
@@ -152,16 +200,26 @@ if uploaded_file is not None:
 
                 if full_draft:
                     st.success("撰写完成。")
-                    st.download_button(
-                        "📥 下载 Markdown 草稿",
-                        data=full_draft.encode("utf-8"),
-                        file_name="生化专利申请撰写辅助草稿.md",
-                        mime="text/markdown",
-                        use_container_width=True,
-                    )
+                    col_md, col_docx = st.columns(2)
+                    with col_md:
+                        st.download_button(
+                            "📥 下载 Markdown 草稿",
+                            data=full_draft.encode("utf-8"),
+                            file_name="生化专利申请撰写辅助草稿.md",
+                            mime="text/markdown",
+                            use_container_width=True,
+                        )
+                    with col_docx:
+                        st.download_button(
+                            "📄 下载 DOCX 草稿（含原理说明）",
+                            data=markdown_to_docx(full_draft),
+                            file_name="生化专利申请撰写辅助草稿.docx",
+                            mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                            use_container_width=True,
+                        )
                 else:
                     st.warning("模型未返回文本内容。")
             except Exception as exc:
                 st.error(f"API 调用失败：{exc}")
 else:
-    st.info("请上传 .docx 技术交底书后开始。")
+    st.info("请上传 DOCX、TXT、MD 等技术材料后开始。")

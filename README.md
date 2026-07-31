@@ -1,6 +1,6 @@
 # 生化专利代理人助手
 
-基于 Streamlit 的中国发明专利撰写辅助工具：上传 `.docx` 技术交底书，调用用户提供的 OpenAI 兼容 API 生成 Markdown 草稿。
+基于 Streamlit 的中国发明专利撰写辅助工具：上传 `.docx`、`.txt`、`.md` 等技术材料，调用用户提供的 OpenAI 兼容 API 生成 Markdown 或 DOCX 草稿。生成内容包含单独的“原理说明”章节。
 
 ## 本地运行
 
